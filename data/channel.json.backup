@@ -1,0 +1,38 @@
+{
+  "channel_id": "fakta_unik_id",
+  "channel_name": "Fakta Unik",
+  "niche": "Fakta Unik",
+  "language": "id",
+  "target_audience": "Dewasa 18+ yang penasaran dan suka pengetahuan umum",
+  "made_for_kids": false,
+  "voice": "id-ID-ArdiNeural",
+  "base_tags": ["fakta unik", "fakta menarik", "pengetahuan umum", "fakta dunia", "shorts indonesia", "did you know"],
+  "hashtags": ["#faktaunik", "#faktamenarik", "#shorts"],
+  "content_rules": [
+    "No medical, health, or financial advice; no unproven health or cure claims.",
+    "No conspiracy theories, pseudoscience, or unverified rumors presented as fact.",
+    "No graphic violence, gore, self-harm, or detailed descriptions of crimes or methods of harm.",
+    "No sexual or sexually suggestive content.",
+    "No politics, elections, religion-bashing, or content targeting ethnicity, race, or groups (SARA).",
+    "No dangerous challenges, drug use instructions, or illegal activities.",
+    "No defamation: do not make negative claims about living private individuals or specific companies.",
+    "Keep it advertiser-friendly: profanity-free and suitable for YouTube monetization."
+  ],
+  "generic_fallback_keywords": [],
+  "sub_themes": [
+    {
+    "name": "Kuliner",
+    "description": "Fakta unik tentang makanan, minuman, dan tradisi kuliner",
+    "content_angles": [
+      "Asal-usul makanan populer",
+      "Teknik memasak unik dari berbagai budaya",
+      "Fakta nutrisi yang mengejutkan"
+    ],
+    "example_topics": [
+      "Cokelat dulunya adalah minuman pahit suku Maya",
+      "Wasabi asli sangat langka, 95% restoran pakai imitasi",
+      "Madu tidak pernah basi, ditemukan di makam Mesir masih layak konsumsi"
+    ]
+    }
+  ]
+}

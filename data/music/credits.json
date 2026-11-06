@@ -1,0 +1,4 @@
+{
+  "_petunjuk": "Isi atribusi untuk lagu yang WAJIB dicantumkan (mis. CC-BY). Key = path relatif dari folder data/music. Lagu tanpa entri dianggap tidak butuh atribusi.",
+  "_contoh/mysterious/nama-lagu.mp3": "Music: \"Judul Lagu\" by Nama Artis (incompetech.com) - Licensed under CC BY 4.0"
+}

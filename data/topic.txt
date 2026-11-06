@@ -1,0 +1,55 @@
+{
+      "name": "Psikologi & Perilaku Manusia",
+      "description": "Kebiasaan, bias kognitif, dan perilaku manusia yang mengejutkan berdasarkan riset psikologi.",
+      "fallback_keywords": ["person thinking", "crowd walking", "human eye"]
+    },
+    {
+      "name": "Sejarah yang Jarang Diketahui",
+      "description": "Peristiwa, tokoh, dan kebiasaan masa lalu yang jarang dibahas tapi tercatat dalam sejarah.",
+      "fallback_keywords": ["ancient ruins", "old map", "historic architecture"]
+    },
+    {
+      "name": "Sains & Tubuh Manusia",
+      "description": "Cara kerja tubuh manusia dan fenomena sains sehari-hari yang terdengar mustahil.",
+      "fallback_keywords": ["microscope laboratory", "human anatomy", "science experiment"]
+    },
+    {
+      "name": "Luar Angkasa & Astronomi",
+      "description": "Planet, bintang, dan fenomena luar angkasa yang membuat kita merasa kecil.",
+      "fallback_keywords": ["night sky stars", "galaxy", "earth from space"]
+    },
+    {
+      "name": "Hewan & Alam yang Aneh",
+      "description": "Kemampuan dan perilaku hewan atau tumbuhan yang luar biasa.",
+      "fallback_keywords": ["wildlife", "underwater ocean", "rainforest"]
+    },
+    {
+      "name": "Uang & Ekonomi",
+      "description": "Sejarah uang, fakta ekonomi, dan kebiasaan finansial unik di dunia (bukan nasihat keuangan).",
+      "fallback_keywords": ["money cash", "coins", "stock market screen"]
+    },
+    {
+      "name": "Hukum & Aturan Unik Dunia",
+      "description": "Aturan dan hukum tak biasa yang benar-benar berlaku di berbagai negara.",
+      "fallback_keywords": ["courthouse", "city street", "travel landmark"]
+    },
+    {
+      "name": "Teknologi & Internet",
+      "description": "Fakta mengejutkan tentang teknologi, komputer, dan sejarah internet.",
+      "fallback_keywords": ["computer code", "smartphone", "server room"]
+    },
+    {
+      "name": "Misteri yang Sudah Terpecahkan",
+      "description": "Misteri terkenal yang akhirnya punya penjelasan ilmiah atau historis.",
+      "fallback_keywords": ["foggy forest", "old documents", "magnifying glass"]
+    },
+    {
+      "name": "Bumi & Geografi Ekstrem",
+      "description": "Tempat paling ekstrem di Bumi: terpanas, terdingin, terdalam, teraneh.",
+      "fallback_keywords": ["volcano", "desert dunes", "glacier"]
+    },
+    {
+      "name": "Makanan & Kuliner Dunia",
+      "description": "Asal-usul makanan dan fakta kuliner yang jarang diketahui.",
+      "fallback_keywords": ["cooking kitchen", "street food", "spices market"]
+    }

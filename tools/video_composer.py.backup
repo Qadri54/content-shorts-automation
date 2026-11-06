@@ -1,0 +1,139 @@
+"""FFmpeg assembly pipeline: scene clips -> concat -> voice + ducked music -> burned subtitles."""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import List, Optional, Sequence
+
+from config.settings import Settings
+from tools.ffmpeg_utils import FFmpegError, probe_duration, run_ffmpeg, write_concat_list
+from tools.pexels_downloader import ClipResult
+
+logger = logging.getLogger(__name__)
+
+
+class VideoComposer:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    @property
+    def _ff(self) -> str:
+        return self.settings.ffmpeg_binary
+
+    def _frame_counts(self, durations: Sequence[float]) -> List[int]:
+        """Convert durations to frame counts using cumulative rounding so the visuals never drift from the audio."""
+        fps = self.settings.video_fps
+        counts, cursor, previous_frame = [], 0.0, 0
+        for duration in durations:
+            cursor += duration
+            frame = int(round(cursor * fps))
+            counts.append(max(frame - previous_frame, 1))
+            previous_frame = frame
+        return counts
+
+    def render_scene(self, clip: ClipResult, frames: int, output: Path) -> None:
+        s = self.settings
+        scene_seconds = frames / s.video_fps
+        spare = clip.duration - scene_seconds
+        offset = min(1.5, spare / 3) if spare > 1.5 else 0.0
+        vf = (
+            f"scale={s.video_width}:{s.video_height}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={s.video_width}:{s.video_height},fps={s.video_fps},setsar=1,format=yuv420p"
+        )
+        run_ffmpeg(
+            [
+                "-stream_loop", "-1", "-ss", f"{offset:.3f}", "-i", clip.path,
+                "-frames:v", str(frames), "-vf", vf, "-an",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                output,
+            ],
+            binary=self._ff,
+        )
+
+    def _audio_graph(self, total: float, has_music: bool) -> str:
+        s = self.settings
+        voice = (
+            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"apad=whole_dur={total:.3f},atrim=0:{total:.3f}"
+        )
+        master = "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000"
+        if not has_music:
+            return f"{voice},{master}[aout]"
+        fade_out_start = max(total - 1.5, 0.0)
+        return (
+            f"{voice},asplit=2[vmix][vkey];"
+            f"[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"volume={s.music_volume_db}dB,atrim=0:{total:.3f},asetpts=PTS-STARTPTS,"
+            f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out_start:.3f}:d=1.5[bg];"
+            f"[bg][vkey]sidechaincompress=threshold=0.03:ratio=6:attack=15:release=350[bgduck];"
+            f"[vmix][bgduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,{master}[aout]"
+        )
+
+    def _subtitle_filter(self, subtitles: Path, work_dir: Path) -> str:
+        # Relative paths avoid FFmpeg filter-escaping problems with Windows drive letters and spaces.
+        relative = Path(os.path.relpath(subtitles, work_dir)).as_posix()
+        filter_str = f"ass={relative}"
+        fonts_dir = self.settings.fonts_dir
+        if fonts_dir.is_dir() and any(fonts_dir.iterdir()):
+            filter_str += f":fontsdir={Path(os.path.relpath(fonts_dir, work_dir)).as_posix()}"
+        return filter_str
+
+    def compose(
+        self,
+        clips: Sequence[ClipResult],
+        scene_durations: Sequence[float],
+        voiceover: Path,
+        subtitles: Path,
+        music: Optional[Path],
+        scenes_dir: Path,
+        output: Path,
+    ) -> Path:
+        if len(clips) != len(scene_durations):
+            raise ValueError("Jumlah klip dan durasi scene tidak sama")
+        s = self.settings
+        durations = list(scene_durations)
+        durations[-1] += s.end_tail_seconds
+        frames = self._frame_counts(durations)
+        total = sum(frames) / s.video_fps
+
+        logger.info("      Memotong & menskalakan %d klip ke %dx%d @ %dfps...", len(clips), s.video_width, s.video_height, s.video_fps)
+        scene_files: List[Path] = []
+        for clip, frame_count in zip(clips, frames):
+            scene_file = scenes_dir / f"scene_{clip.scene_number:02d}.mp4"
+            self.render_scene(clip, frame_count, scene_file)
+            scene_files.append(scene_file)
+
+        list_file = scenes_dir / "scenes_list.txt"
+        visuals = scenes_dir / "visuals.mp4"
+        write_concat_list(scene_files, list_file)
+        run_ffmpeg(["-f", "concat", "-safe", "0", "-i", list_file.name, "-c", "copy", visuals.name], binary=self._ff, cwd=scenes_dir)
+
+        work_dir = output.parent
+        inputs = ["-i", visuals, "-i", voiceover]
+        if music:
+            inputs += ["-stream_loop", "-1", "-i", music]
+        filter_complex = f"[0:v]{self._subtitle_filter(subtitles, work_dir)}[vout];{self._audio_graph(total, music is not None)}"
+
+        logger.info("      Render final (H.264/AAC, %.1f detik%s)...", total, ", dengan musik" if music else ", tanpa musik")
+        run_ffmpeg(
+            [
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[vout]", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", s.video_preset, "-crf", str(s.video_crf),
+                "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", str(s.video_fps),
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+                "-movflags", "+faststart", "-t", f"{total:.3f}",
+                output.name,
+            ],
+            binary=self._ff,
+            cwd=work_dir,
+            timeout=1800,
+        )
+        if not output.is_file() or output.stat().st_size == 0:
+            raise FFmpegError("Render selesai tetapi file output tidak ditemukan")
+        final_duration = probe_duration(output, binary=s.ffprobe_binary)
+        logger.info("      Video final: %s (%.1f detik, %.1f MB)", output.name, final_duration, output.stat().st_size / 1_048_576)
+        return output

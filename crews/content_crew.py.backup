@@ -1,0 +1,460 @@
+"""CrewAI layer: Scriptwriter -> Fact-Checker -> Visual & SEO Director.
+
+Stage 1 (research crew): Scriptwriter drafts a script, Fact-Checker verifies it.
+Stage 2 (director crew): Visual & SEO Director turns the verified narration into a VideoBlueprint.
+Splitting the stages lets us discard rejected facts before spending a request on storyboarding.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import random
+import re
+import time
+from dataclasses import dataclass
+from difflib import SequenceMatcher
+from typing import Any, List, Sequence, Type, TypeVar
+
+os.environ.setdefault("CREWAI_TELEMETRY_OPT_OUT", "true")
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
+
+from crewai import LLM, Agent, Crew, Process, Task  # noqa: E402
+from pydantic import BaseModel, ValidationError  # noqa: E402
+
+from config.settings import Settings  # noqa: E402
+from schemas.blueprint import MUSIC_MOODS, FactCheckReport, Scene, ScriptDraft, VideoBlueprint  # noqa: E402
+from schemas.channel import ChannelProfile, SubTheme  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+HOOK_STYLES: tuple[str, ...] = (
+    "a provocative question the viewer feels they must know the answer to",
+    "a statement that sounds impossible but is true",
+    "a shocking number or statistic in the very first sentence",
+    "an immersive 'bayangkan kamu...' scenario that drops the viewer into the situation",
+    "debunking a common belief ('yang selama ini kamu percaya ternyata keliru')",
+    "starting from the surprising ending, then rewinding to explain how it happened",
+)
+
+BANNED_OPENERS: tuple[str, ...] = (
+    "Halo guys",
+    "Hai semuanya",
+    "Halo teman-teman",
+    "Selamat datang",
+    "Di video kali ini",
+    "Tahukah kamu",
+)
+
+MIN_SCENES = 12
+MAX_SCENES = 15
+
+
+class ContentGenerationError(RuntimeError):
+    """Raised when the crew cannot produce a usable, fact-checked blueprint."""
+
+
+@dataclass
+class ContentPackage:
+    blueprint: VideoBlueprint
+    draft: ScriptDraft
+    fact_check: FactCheckReport
+    hook_style: str
+    attempts: int
+
+
+def _sanitize(text: str) -> str:
+    """Remove curly braces so CrewAI never treats dynamic text as template placeholders."""
+    return text.replace("{", "(").replace("}", ")").strip()
+
+
+def _normalize_words(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def _parse_json_block(raw: str) -> Any:
+    cleaned = raw.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", cleaned, flags=re.DOTALL)
+    if fence:
+        cleaned = fence.group(1).strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise ContentGenerationError("Output agent tidak berisi JSON yang valid")
+    try:
+        return json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ContentGenerationError(f"Gagal mem-parsing JSON dari agent: {exc}") from exc
+
+
+class ContentCrew:
+    MIN_CONFIDENCE = 0.7
+    MIN_WORDS = 90
+    MIN_SCRIPT_SIMILARITY = 0.8
+    COOLDOWN_SECONDS = 4.0
+
+    def __init__(self, settings: Settings, channel: ChannelProfile, verbose: bool = False) -> None:
+        self.settings = settings
+        self.channel = channel
+        self.verbose = verbose
+        self.llm = LLM(
+            model=settings.gemini_model,
+            api_key=settings.gemini_api_key,
+            temperature=settings.llm_temperature,
+        )
+
+    # ----------------------------------------------------------------- agents
+    def _scriptwriter(self) -> Agent:
+        return Agent(
+            role="Penulis Naskah YouTube Shorts Fakta Unik",
+            goal=(
+                "Craft ultra-engaging, fast-paced YouTube Shorts scripts in natural, conversational Indonesian "
+                "about one surprising, verifiable fact, opening with a high-retention hook in the first 3 seconds."
+            ),
+            backstory=(
+                "You are a top Indonesian short-form storyteller for adult audiences (18+). Your videos keep "
+                "people watching until the last second because every sentence creates a new curiosity gap. "
+                "You never open with greetings or filler, never sound robotic, and you only build stories on "
+                "facts that reputable sources document."
+            ),
+            llm=self.llm,
+            max_iter=self.settings.agent_max_iter,
+            allow_delegation=False,
+            verbose=self.verbose,
+        )
+
+    def _fact_checker(self) -> Agent:
+        return Agent(
+            role="Pemeriksa Fakta Senior",
+            goal=(
+                "Guarantee every claim in the script is accurate and well documented; correct or remove anything "
+                "uncertain, and reject the script if its core fact is false, disputed or unverifiable."
+            ),
+            backstory=(
+                "You are a meticulous fact-checker with a background in science journalism and history research. "
+                "You know the classic viral myths and misattributions, distrust suspiciously precise numbers, and "
+                "would rather cut a detail than publish something you cannot back with a reputable source."
+            ),
+            llm=self.llm,
+            max_iter=self.settings.agent_max_iter,
+            allow_delegation=False,
+            verbose=self.verbose,
+        )
+
+    def _director(self) -> Agent:
+        return Agent(
+            role="Visual & SEO Director YouTube Shorts",
+            goal=(
+                f"Deconstruct a fact-checked narration into {MIN_SCENES}-{MAX_SCENES} visual scenes of 3-5 seconds "
+                "with literal, searchable B-roll keywords, and produce truthful, high-CTR Indonesian SEO metadata."
+            ),
+            backstory=(
+                "You are a short-form video director who knows exactly which stock footage keeps viewers hooked "
+                "and an SEO specialist for the Indonesian YouTube market. You never change the approved narration."
+            ),
+            llm=self.llm,
+            max_iter=self.settings.agent_max_iter,
+            allow_delegation=False,
+            verbose=self.verbose,
+        )
+
+    # ------------------------------------------------------------------ tasks
+    def _rules_block(self) -> str:
+        rules = self.channel.content_rules or ["Follow YouTube Community Guidelines and advertiser-friendly policies."]
+        return "\n".join(f"- {_sanitize(rule)}" for rule in rules)
+
+    def _script_task(self, agent: Agent, sub_theme: SubTheme, hook_style: str, avoid: Sequence[str]) -> Task:
+        avoid_block = "\n".join(f"- {_sanitize(topic)}" for topic in avoid) or "- (none yet)"
+        banned = ", ".join(f'"{opener}"' for opener in BANNED_OPENERS)
+        description = f"""You are writing ONE YouTube Shorts script for the channel "{_sanitize(self.channel.channel_name)}" (niche: {_sanitize(self.channel.niche)}).
+Target audience: {_sanitize(self.channel.target_audience)}. Language: natural, conversational Indonesian (bahasa sehari-hari yang luwes, menyapa penonton dengan "kamu"), never stiff or overly formal.
+
+SUB-THEME: {_sanitize(sub_theme.name)} - {_sanitize(sub_theme.description)}
+HOOK STYLE FOR THIS VIDEO: {hook_style}
+
+STEP 1 - Choose the topic:
+- Pick ONE specific, surprising fact inside the sub-theme that is well documented by reputable sources (encyclopedias, universities, scientific institutions, peer-reviewed research, official records).
+- Do NOT use myths, urban legends, hoaxes, disputed claims, or popular "facts" that have been debunked.
+- The topic must be clearly different from every topic already covered:
+{avoid_block}
+
+STEP 2 - Write the script (target 140-160 words, hard limits 130-170 words, about 55-60 seconds of narration):
+1. HOOK (first sentence, max 12 words): must stop the scroll within 3 seconds. No greetings, no channel intro. Never start with any of: {banned}.
+2. BODY: explain the fact with 2-4 concrete details (names, places, years, numbers). One idea per sentence, short sentences (max about 15 words). Keep opening new curiosity gaps.
+3. TWIST / CLOSING: end with a surprising implication or perspective shift, then one short question that invites comments.
+- Plain spoken text only: no emojis, hashtags, bullet points, stage directions, brackets, or speaker labels.
+- Use digits for years and large numbers when natural (e.g. 1945, 300 juta).
+
+CONTENT SAFETY RULES (mandatory):
+{self._rules_block()}
+
+STEP 3 - List every factual claim made in the script in key_claims, one claim per item."""
+        return Task(
+            description=description,
+            expected_output="A JSON object matching ScriptDraft with fields: topic, hook, script, key_claims.",
+            agent=agent,
+            output_pydantic=ScriptDraft,
+        )
+
+    def _fact_check_task(self, agent: Agent, script_task: Task) -> Task:
+        description = f"""Review the script from the previous task as a strict fact-checker for a "{_sanitize(self.channel.niche)}" channel whose credibility depends on accuracy.
+
+For EVERY factual claim in the script:
+- "verified": well established and widely documented by reputable sources.
+- "corrected": partly wrong, exaggerated or imprecise - fix it in the script.
+- "removed": cannot be confidently verified - remove it from the script.
+- source_hint: name a reputable institution or reference where the claim can be verified (e.g. NASA, Encyclopaedia Britannica, National Geographic, WHO, a named scientific journal). Never invent URLs, paper titles or quotes.
+
+Watch for: viral myths, misattributed quotes, outdated statistics, numbers more precise than sources allow, sensational exaggeration, and anything that breaks the content rules.
+
+Verdict:
+- APPROVED: everything is accurate; final_script is the unchanged script.
+- REVISED: details were corrected/removed but the core fact is solid; final_script is the fixed script.
+- REJECTED: the core fact itself is false, disputed or unverifiable, or the script violates the content rules; final_script is the original script.
+
+final_script must keep the hook, tone and structure, stay within 130-170 words, and contain plain spoken Indonesian only.
+confidence: a number between 0 and 1 expressing how sure you are that final_script is factually accurate.
+reason: one or two sentences explaining the verdict.
+
+CONTENT SAFETY RULES:
+{self._rules_block()}"""
+        return Task(
+            description=description,
+            expected_output="A JSON object matching FactCheckReport with fields: verdict, confidence, final_script, claims, reason.",
+            agent=agent,
+            context=[script_task],
+            output_pydantic=FactCheckReport,
+        )
+
+    def _director_task(self, agent: Agent, sub_theme: SubTheme, topic: str, narration: str) -> Task:
+        moods = ", ".join(MUSIC_MOODS)
+        description = f"""Turn this fact-checked YouTube Shorts narration into a high-retention production blueprint.
+
+NARRATION (approved - use it verbatim):
+\"\"\"{_sanitize(narration)}\"\"\"
+
+TOPIC CONTEXT:
+Sub-Theme: {_sanitize(sub_theme.name)}
+Topic: {_sanitize(topic)}
+
+SCENES:
+- Split the narration into {MIN_SCENES}-{MAX_SCENES} consecutive scenes of roughly 3-5 seconds each (about 8-14 words per scene), splitting at natural sentence or clause boundaries.
+- narration_text must be copied word-for-word. Joining all scenes in order must reproduce the narration exactly: do not add, remove, reorder or rephrase any word.
+- scene_number starts at 1 and increases by 1.
+- visual_intent: A strict, concrete physical description of what MUST appear on screen to literally depict this specific narration beat (e.g. "Close-up of human neurons transmitting electrical impulses", "Roman soldier in armor holding a shield").
+- b_roll_keywords: 2-3 precise English search queries (1-2 words each) for stock video databases (Pixabay/Pexels).
+
+MANDATORY VISUAL RULES (STRICT CONTEXT CORRELATION):
+1. LITERAL ACCURACY: The visual MUST directly reflect the exact entity, action, organism, object, or historical era mentioned in narration_text.
+   - Mentioning brain/thinking -> "human brain", "neuron synapse", "person thinking"
+   - Mentioning deep ocean/animals -> "deep ocean", "bioluminescent fish", "underwater sea"
+   - Mentioning money/coins -> "ancient coins", "gold bars", "paper money"
+   - Mentioning space/stars -> "galaxy nebula", "telescope space", "planet earth"
+2. ZERO TOLERANCE FOR RANDOM FILLERS: NEVER generate generic stock clichés like "clouds timelapse", "city traffic", "abstract motion", or smiling office models unless the narration is literally about clouds, traffic, or office work.
+3. SEARCH-ENGINE FRIENDLY (1-2 words): Stock video search engines index by simple tags. Keep keywords short and specific (e.g. "brain scan", NOT "how the brain processes difficult decisions").
+4. AVOID ABSTRACT METAPHORS: Show tangible physical objects and actions, not vague metaphors.
+
+- estimated_duration_seconds: the scene's word count divided by 2.7.
+
+SEO METADATA (Indonesian):
+- title: max 70 characters, curiosity-driven but truthful (no misleading clickbait), no hashtags.
+- description: 2-3 short sentences teasing the fact and ending with a question; up to 3 relevant hashtags at the end.
+- tags: 10-15 tags mixing Indonesian and English keywords relevant to the topic.
+- music_mood: exactly one of: {moods}.
+
+FIXED VALUES (copy exactly):
+- channel_id: {_sanitize(self.channel.channel_id)}
+- niche: {_sanitize(self.channel.niche)}
+- sub_theme: {_sanitize(sub_theme.name)}
+- topic: {_sanitize(topic)}"""
+        return Task(
+            description=description,
+            expected_output="A JSON object matching VideoBlueprint with all fields filled.",
+            agent=agent,
+            output_pydantic=VideoBlueprint,
+        )
+
+    # -------------------------------------------------------------- execution
+    @staticmethod
+    def _extract(task_output: Any, model: Type[ModelT]) -> ModelT:
+        try:
+            parsed = getattr(task_output, "pydantic", None)
+            if isinstance(parsed, model):
+                return parsed
+            if isinstance(parsed, BaseModel):
+                return model.model_validate(parsed.model_dump())
+            data = getattr(task_output, "json_dict", None)
+            if data:
+                return model.model_validate(data)
+            raw = getattr(task_output, "raw", "") or str(task_output)
+            return model.model_validate(_parse_json_block(raw))
+        except ValidationError as exc:
+            raise ContentGenerationError(f"Output agent tidak sesuai schema {model.__name__}: {exc}") from exc
+
+    def _crew(self, agents: List[Agent], tasks: List[Task]) -> Crew:
+        return Crew(
+            agents=agents,
+            tasks=tasks,
+            process=Process.sequential,
+            verbose=self.verbose,
+            max_rpm=self.settings.crew_max_rpm,
+        )
+
+    def _run_research(
+        self, sub_theme: SubTheme, hook_style: str, avoid: Sequence[str]
+    ) -> tuple[ScriptDraft, FactCheckReport]:
+        writer, checker = self._scriptwriter(), self._fact_checker()
+        script_task = self._script_task(writer, sub_theme, hook_style, avoid)
+        check_task = self._fact_check_task(checker, script_task)
+        result = self._crew([writer, checker], [script_task, check_task]).kickoff()
+        outputs = list(getattr(result, "tasks_output", []) or [])
+        if len(outputs) < 2:
+            raise ContentGenerationError("Crew riset tidak mengembalikan output lengkap")
+        draft = self._extract(outputs[0], ScriptDraft)
+        report = self._extract(outputs[1], FactCheckReport)
+        if report.confidence > 1:
+            report.confidence = report.confidence / 100.0
+        report.confidence = max(0.0, min(1.0, report.confidence))
+        return draft, report
+
+    def _accept(self, report: FactCheckReport) -> tuple[bool, str]:
+        if report.verdict == "REJECTED":
+            return False, f"Fact-checker menolak fakta: {report.reason}"
+        if report.confidence < self.MIN_CONFIDENCE:
+            return False, f"Confidence terlalu rendah ({report.confidence:.2f}): {report.reason}"
+        words = _word_count(report.final_script)
+        if words < self.MIN_WORDS:
+            return False, f"Naskah terlalu pendek setelah fact-check ({words} kata)"
+        return True, ""
+
+    def _clean_blueprint(self, blueprint: VideoBlueprint, sub_theme: SubTheme, topic: str) -> VideoBlueprint:
+        fallback = sub_theme.fallback_keywords or [topic.lower()]
+        scenes: List[Scene] = []
+        for scene in blueprint.scenes:
+            text = " ".join(scene.narration_text.split())
+            if not text:
+                continue
+            keywords = [" ".join(k.split()) for k in scene.b_roll_keywords if k and k.strip()][:3] or fallback[:2]
+            intent = getattr(scene, "visual_intent", "").strip() or text
+            scenes.append(
+                Scene(
+                    scene_number=len(scenes) + 1,
+                    narration_text=text,
+                    visual_intent=intent,
+                    b_roll_keywords=keywords,
+                    estimated_duration_seconds=round(max(1.0, _word_count(text) / 2.7), 2),
+                )
+            )
+        if len(scenes) < 5:
+            raise ContentGenerationError(f"Director hanya menghasilkan {len(scenes)} scene")
+
+        title = " ".join(blueprint.title.replace('"', "").split())
+        if len(title) > 100:
+            title = title[:97].rstrip() + "..."
+
+        tags: List[str] = []
+        seen: set[str] = set()
+        for tag in list(blueprint.tags) + list(self.channel.base_tags):
+            cleaned = " ".join(tag.replace("#", "").replace(",", " ").split())
+            if cleaned and cleaned.lower() not in seen and sum(len(t) + 1 for t in tags) + len(cleaned) <= 450:
+                seen.add(cleaned.lower())
+                tags.append(cleaned)
+
+        return blueprint.model_copy(
+            update={
+                "channel_id": self.channel.channel_id,
+                "niche": self.channel.niche,
+                "sub_theme": sub_theme.name,
+                "topic": topic,
+                "title": title,
+                "description": blueprint.description.strip(),
+                "tags": tags,
+                "scenes": scenes,
+            }
+        )
+
+    def _run_director(self, sub_theme: SubTheme, topic: str, narration: str, attempts: int = 3) -> VideoBlueprint:
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                director = self._director()
+                task = self._director_task(director, sub_theme, topic, narration)
+                result = self._crew([director], [task]).kickoff()
+                outputs = list(getattr(result, "tasks_output", []) or [])
+                blueprint = self._extract(outputs[0] if outputs else result, VideoBlueprint)
+                blueprint = self._clean_blueprint(blueprint, sub_theme, topic)
+                similarity = SequenceMatcher(
+                    None, _normalize_words(narration), _normalize_words(blueprint.full_script())
+                ).ratio()
+                if similarity < self.MIN_SCRIPT_SIMILARITY:
+                    raise ContentGenerationError(
+                        f"Director mengubah narasi terlalu banyak (kemiripan {similarity:.0%})"
+                    )
+                if similarity < 0.97:
+                    logger.warning("    Narasi scene sedikit berbeda dari naskah fact-check (kemiripan %.0f%%)", similarity * 100)
+                return blueprint
+            except Exception as exc:  # noqa: BLE001 - surface any CrewAI/LLM failure with context
+                last_error = exc
+                wait_time = self.COOLDOWN_SECONDS * (2 ** (attempt - 1))
+                logger.warning("    Director gagal (percobaan %d/%d, jeda %.0fs): %s", attempt, attempts, wait_time, exc)
+                if attempt < attempts:
+                    time.sleep(wait_time)
+        raise ContentGenerationError(f"Visual & SEO Director gagal membuat blueprint: {last_error}")
+
+    def generate(self, sub_theme: SubTheme, avoid_topics: Sequence[str], max_attempts: int = 3) -> ContentPackage:
+        """Produce a fact-checked VideoBlueprint, retrying with a new topic if the fact is rejected."""
+        avoid = list(avoid_topics)
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            hook_style = random.choice(HOOK_STYLES)
+            logger.info("    Scriptwriter + Fact-Checker bekerja (percobaan %d/%d)...", attempt, max_attempts)
+            try:
+                draft, report = self._run_research(sub_theme, hook_style, avoid)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("    Crew riset gagal: %s", exc)
+                time.sleep(self.COOLDOWN_SECONDS)
+                continue
+
+            logger.info(
+                "    Topik: %s | verdict: %s | confidence: %.2f | %d kata",
+                draft.topic, report.verdict, report.confidence, _word_count(report.final_script),
+            )
+            accepted, reason = self._accept(report)
+            if not accepted:
+                logger.warning("    %s -> mencari topik lain", reason)
+                avoid.append(draft.topic)
+                last_error = ContentGenerationError(reason)
+                time.sleep(self.COOLDOWN_SECONDS)
+                continue
+
+            time.sleep(self.COOLDOWN_SECONDS)
+            logger.info("    Visual & SEO Director menyusun storyboard...")
+            try:
+                blueprint = self._run_director(sub_theme, draft.topic, report.final_script)
+            except ContentGenerationError as exc:
+                last_error = exc
+                logger.warning("    %s -> mencoba topik/percobaan baru...", exc)
+                avoid.append(draft.topic)
+                time.sleep(self.COOLDOWN_SECONDS * 2)
+                continue
+            logger.info("    Blueprint siap: \"%s\" (%d scene, mood musik: %s)", blueprint.title, len(blueprint.scenes), blueprint.music_mood)
+            return ContentPackage(
+                blueprint=blueprint,
+                draft=draft,
+                fact_check=report,
+                hook_style=hook_style,
+                attempts=attempt,
+            )
+        raise ContentGenerationError(f"Gagal menghasilkan naskah yang lolos fact-check: {last_error}")
+
+    def ping(self) -> str:
+        """Send a tiny request to verify the Gemini model and API key."""
+        return str(self.llm.call("Balas hanya dengan kata: OK"))

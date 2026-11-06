@@ -1,0 +1,26 @@
+[
+  {
+    "account_id": "fakta_pop_science",
+    "channel_name": "Fakta Pop Science",
+    "niche": "Pop Science",
+    "target_audience": "Dewasa 18+ penyuka sains dan fenomena alam",
+    "voice": "id-ID-ArdiNeural",
+    "description": "Fakta-fakta mengejutkan tentang biologi, fisika, luar angkasa, dan tubuh manusia."
+  },
+  {
+    "account_id": "fakta_psikologi",
+    "channel_name": "Fakta Psikologi & Pikiran",
+    "niche": "Productivity & Psychology",
+    "target_audience": "Dewasa 18+ yang tertarik dengan perilaku manusia dan cara kerja otak",
+    "voice": "id-ID-ArdiNeural",
+    "description": "Fakta unik di balik psikologi manusia, bias kognitif, dan alam bawah sadar."
+  },
+  {
+    "account_id": "fakta_sejarah_rahasia",
+    "channel_name": "Fakta Sejarah Tersembunyi",
+    "niche": "Hidden History",
+    "target_audience": "Dewasa 18+ pecinta misteri dan peristiwa sejarah tak biasa",
+    "voice": "id-ID-ArdiNeural",
+    "description": "Kisah dan fakta sejarah yang jarang diajarkan di buku pelajaran."
+  }
+]

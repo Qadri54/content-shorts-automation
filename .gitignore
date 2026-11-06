@@ -1,0 +1,22 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/output/
+data/history.json
+data/music/**/*.mp3
+data/music/**/*.wav
+data/music/**/*.m4a
+data/music/**/*.ogg
+data/music/**/*.flac
+
+# Logo 
+logo-exports/
+
+# html
+logo-di-balik-piring.html
+logo-variasi-warna.html
+
+# YouTube credentials (SENSITIVE - never commit)
+config/client_secret.json
+config/youtube_credentials.json

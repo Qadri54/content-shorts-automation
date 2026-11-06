@@ -1,0 +1,22 @@
+# LLM orchestration (native Gemini provider)
+crewai[google-genai]>=0.95.0
+google-genai
+
+# Config & data contracts
+pydantic>=2.0
+pydantic-settings
+python-dotenv
+
+# Media tooling
+requests
+edge-tts
+faster-whisper
+av<19
+
+# YouTube upload & thumbnail generation
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.108.0
+Pillow>=10.0.0
+
+# FFmpeg itself is called through subprocess (ffmpeg/ffprobe CLI must be on PATH).
