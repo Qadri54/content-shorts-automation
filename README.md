@@ -123,9 +123,9 @@ Format file harus seperti ini:
 
 **Rekomendasi: Gunakan Manual Mode (lebih stabil di Windows)**
 
-```powershell
+```bash
 # Aktifkan virtual environment terlebih dahulu
-.\.venv\Scripts\Activate.ps1
+.venv/Scripts/activate
 
 # Jalankan script manual authentication
 python scripts/setup_youtube_manual.py
@@ -142,7 +142,7 @@ python scripts/setup_youtube_manual.py
 8. Credentials akan tersimpan di `config/youtube_credentials.json`
 
 **Alternatif: Automatic Browser Mode (jika manual tidak berhasil)**
-```powershell
+```bash
 python scripts/setup_youtube.py
 ```
 
@@ -151,7 +151,7 @@ python scripts/setup_youtube.py
 #### E. Verifikasi Setup
 
 Setelah authentication berhasil, test upload:
-```powershell
+```bash
 python main.py --count 1 --upload
 ```
 
@@ -159,13 +159,13 @@ python main.py --count 1 --upload
 
 ## Installation & Setup
 
-```powershell
+```bash
 cd yt-shorts-factory
 py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.venv/Scripts/activate
 pip install -r requirements.txt
-copy .env.example .env      # lalu isi GEMINI_API_KEY & PIXABAY_API_KEY
-python main.py --check      # verifikasi semua komponen
+cp .env.example .env      # lalu isi GEMINI_API_KEY & PIXABAY_API_KEY
+python main.py --check    # verifikasi semua komponen
 ```
 
 FFmpeg wajib ada di PATH (`winget install Gyan.FFmpeg`).
@@ -174,13 +174,14 @@ FFmpeg wajib ada di PATH (`winget install Gyan.FFmpeg`).
 
 ## Usage
 
-```powershell
+```bash
 python main.py                          # 1 video
 python main.py --count 3                # 3 video berurutan (jeda 5 detik)
 python main.py --sub-theme "Luar Angkasa"
 python main.py --blueprint-only         # naskah + metadata saja, tanpa render
 python main.py --count 3 --cleanup      # hapus file sementara setelah render
 python main.py --verbose                # tampilkan proses agent
+python main.py --count 1 --upload       # generate + upload video ke YouTube
 ```
 
 ---
